@@ -1,77 +1,83 @@
-Step 1: Imports & Synthetic Data
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-np.random.seed(42)
+# -------------------- DATA GENERATION --------------------
+np.random.seed(7)
+N = 6000
+t = np.arange(N)
 
-timesteps = 1200
-t = np.arange(timesteps)
+trend = 0.0005 * t
+seasonal_1 = np.sin(2 * np.pi * t / 50)
+seasonal_2 = np.sin(2 * np.pi * t / 200)
+noise = np.random.normal(0, 0.3, N)
 
-trend = 0.01 * t
-seasonal_1 = np.sin(0.02 * t)
-seasonal_2 = np.cos(0.04 * t)
-noise = np.random.normal(0, 0.2, timesteps)
+f1 = trend + seasonal_1 + noise
+f2 = 0.5 * f1 + seasonal_2 + noise
+f3 = np.roll(f1, 5) + noise
+f4 = np.cos(seasonal_1) + noise
+f5 = 0.3 * f2 + 0.2 * f3 + noise
 
-feature_1 = trend + seasonal_1 + noise
-feature_2 = seasonal_2 + 0.5 * feature_1 + noise
+data = np.column_stack([f1, f2, f3, f4, f5])
 
-data = np.vstack([feature_1, feature_2]).T
-
-Step 2: Differencing & Scaling
+# -------------------- PREPROCESSING --------------------
 data_diff = np.diff(data, axis=0)
-
-scaler = MinMaxScaler()
+scaler = StandardScaler()
 data_scaled = scaler.fit_transform(data_diff)
 
-Step 3: Windowing
-def create_sequences(data, window_size=20):
+# -------------------- WINDOWING --------------------
+def make_sequences(data, window=30):
     X, y = [], []
-    for i in range(len(data) - window_size):
-        X.append(data[i:i+window_size])
-        y.append(data[i+window_size, 0])
+    for i in range(len(data) - window):
+        X.append(data[i:i+window])
+        y.append(data[i+window, 0])
     return np.array(X), np.array(y)
 
-X, y = create_sequences(data_scaled)
+X, y = make_sequences(data_scaled)
 
-Step 4: LSTM Model
+train_end = int(0.7 * len(X))
+val_end = int(0.85 * len(X))
+
+X_train, y_train = X[:train_end], y[:train_end]
+X_val, y_val = X[train_end:val_end], y[train_end:val_end]
+X_test, y_test = X[val_end:], y[val_end:]
+
+# -------------------- MODEL --------------------
 model = Sequential([
     LSTM(64, input_shape=(X.shape[1], X.shape[2])),
     Dense(1)
 ])
 
-model.compile(
-    optimizer="adam",
-    loss="mse"
-)
+model.compile(optimizer="adam", loss="mse")
+model.fit(X_train, y_train, validation_data=(X_val, y_val),
+          epochs=15, batch_size=32, verbose=0)
 
-model.fit(X, y, epochs=10, batch_size=32, verbose=1)
+# -------------------- EVALUATION --------------------
+preds = model.predict(X_test)
+rmse = np.sqrt(mean_squared_error(y_test, preds))
+mae = mean_absolute_error(y_test, preds)
 
-Step 5: Integrated Gradients (Explainability)
-def integrated_gradients(model, inputs, baseline=None, steps=50):
-    if baseline is None:
-        baseline = np.zeros(inputs.shape)
+print("RMSE:", rmse)
+print("MAE:", mae)
 
-    interpolated = [
-        baseline + (float(i) / steps) * (inputs - baseline)
-        for i in range(steps + 1)
-    ]
-
+# -------------------- INTEGRATED GRADIENTS --------------------
+def integrated_gradients(model, x, steps=50):
+    baseline = tf.zeros_like(x)
+    interpolated = [baseline + (i / steps) * (x - baseline) for i in range(steps + 1)]
     grads = []
-    for x in interpolated:
+    for inp in interpolated:
         with tf.GradientTape() as tape:
-            tape.watch(x)
-            pred = model(x)
-        grad = tape.gradient(pred, x)
-        grads.append(grad)
-
+            tape.watch(inp)
+            pred = model(inp)
+        grads.append(tape.gradient(pred, inp))
     avg_grads = tf.reduce_mean(tf.stack(grads), axis=0)
-    return (inputs - baseline) * avg_grads
+    return (x - baseline) * avg_grads
 
-sample = X[:1]
-ig_attributions = integrated_gradients(model, sample)
+sample = X_test[:1]
+ig = integrated_gradients(model, sample)
+feature_importance = np.mean(np.abs(ig.numpy()), axis=(0, 1))
 
-importance = np.mean(np.abs(ig_attributions.numpy()), axis=(0,1))
-print("Feature importance:", importance)
+print("Feature Importance:", feature_importance)
